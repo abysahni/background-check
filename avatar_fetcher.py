@@ -193,15 +193,17 @@ def resolve_candidate_avatar(
                         "gallery": [{"url": gh_avatar, "title": "GitHub Profile Photo", "source": link}]
                     }
 
-    # 3. Live Public Web Image Search
+    # 3. Live Public Web Image Search.
+    # IMPORTANT: image search matches on a NAME only - it does NOT prove the photo
+    # is this person. Never auto-assign a web image as the candidate's identity.
     web_photos = search_candidate_web_photos(name=name, location=location, employer=employer, max_results=4)
     if web_photos:
-        primary_photo = web_photos[0]
         return {
-            "url": primary_photo["url"],
-            "source": f"Web Photo ({primary_photo.get('title', 'Public Profile')[:35]}...)",
-            "confidence": "Medium (Web Discovery)",
-            "gallery": web_photos
+            "url": get_initials_avatar(name),
+            "source": "Generated Name Badge (no confirmed photo)",
+            "confidence": "Fallback",
+            "gallery": [],
+            "unconfirmed_matches": web_photos,
         }
 
     # 4. Fallback Initials Badge
