@@ -142,15 +142,19 @@ Return ONLY a valid JSON object with NO markdown formatting (no ```json ... ```)
     try:
         from google import genai
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
-        content = response.text.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
-        return json.loads(content)
+        for mod in ["gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=mod,
+                    contents=prompt,
+                )
+                content = response.text.strip()
+                if content.startswith("```"):
+                    content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+                    content = re.sub(r"\n?```$", "", content)
+                return json.loads(content)
+            except Exception:
+                continue
     except Exception:
         pass
 

@@ -137,18 +137,21 @@ Resume Text:
     try:
         from google import genai
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
-        content = response.text.strip()
-        # Clean json formatting if wrapped in markdown
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
-        data = json.loads(content)
-        data["raw_text"] = raw_text
-        return data
+        for mod in ["gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=mod,
+                    contents=prompt,
+                )
+                content = response.text.strip()
+                if content.startswith("```"):
+                    content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+                    content = re.sub(r"\n?```$", "", content)
+                data = json.loads(content)
+                data["raw_text"] = raw_text
+                return data
+            except Exception:
+                continue
     except Exception:
         pass
 
