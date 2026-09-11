@@ -149,32 +149,17 @@ Resume Text:
                     content = re.sub(r"\n?```$", "", content)
                 data = json.loads(content)
                 data["raw_text"] = raw_text
+                data["_model_used"] = mod
                 return data
             except Exception:
                 continue
     except Exception:
         pass
 
-    # 2. Try google-generativeai SDK
-    try:
-        import google.generativeai as legacy_genai
-        legacy_genai.configure(api_key=api_key)
-        model = legacy_genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        content = response.text.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
-        data = json.loads(content)
-        data["raw_text"] = raw_text
-        return data
-    except Exception:
-        pass
-
-    # 3. Direct REST HTTP API via httpx
+    # 2. Direct REST HTTP API via httpx (single robust fallback)
     try:
         import httpx
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}]
         }
@@ -188,6 +173,7 @@ Resume Text:
                     text_part = re.sub(r"\n?```$", "", text_part)
                 data = json.loads(text_part)
                 data["raw_text"] = raw_text
+                data["_model_used"] = "gemini-2.5-flash (REST)"
                 return data
     except Exception:
         pass
