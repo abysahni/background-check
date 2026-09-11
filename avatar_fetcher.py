@@ -116,20 +116,23 @@ def search_candidate_web_photos(
                 if not q or q == f'"{clean_name}"':
                     continue
                 try:
-                    raw_imgs = list(ddgs.images(q, max_results=max_results))
-                    for item in raw_imgs:
-                        thumb = item.get("thumbnail") or item.get("image")
-                        high_res = item.get("image") or thumb
-                        if thumb and thumb not in seen_urls:
-                            seen_urls.add(thumb)
-                            discovered.append({
-                                "url": thumb,
-                                "high_res": high_res,
-                                "title": item.get("title", f"Photo for {clean_name}"),
-                                "source": item.get("url", ""),
-                            })
-                    if len(discovered) >= max_results:
-                        break
+                    raw_imgs = ddgs.images(q, max_results=max_results)
+                    if raw_imgs:
+                        for item in raw_imgs:
+                            if not isinstance(item, dict):
+                                continue
+                            thumb = item.get("thumbnail") or item.get("image")
+                            high_res = item.get("image") or thumb
+                            if thumb and thumb not in seen_urls:
+                                seen_urls.add(thumb)
+                                discovered.append({
+                                    "url": thumb,
+                                    "high_res": high_res,
+                                    "title": item.get("title", f"Photo for {clean_name}"),
+                                    "source": item.get("url", ""),
+                                })
+                        if len(discovered) >= max_results:
+                            break
                 except Exception:
                     continue
     except Exception:
@@ -145,6 +148,7 @@ def resolve_candidate_avatar(
     github_handle: Optional[str] = None,
     location: Optional[str] = None,
     employer: Optional[str] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
     Resolve best candidate avatar and photo gallery using multi-source discovery:

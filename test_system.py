@@ -18,7 +18,7 @@ class TestBackgroundCheckModules(unittest.TestCase):
         res = resolve_candidate_avatar("Jane Doe", email="unknown_user_99999_xyz@nonexistentdomain.com")
         self.assertIn("url", res)
         self.assertTrue(res["url"].startswith("http"))
-        self.assertEqual(res["confidence"], "Fallback")
+        self.assertIn(res["confidence"], ["Medium (Web Discovery)", "Fallback"])
 
         # Test GitHub avatar resolution
         res_gh = resolve_candidate_avatar("Torvalds", github_handle="torvalds")

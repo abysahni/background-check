@@ -285,33 +285,57 @@ if st.session_state["parsed_data"]:
             # 2. Resolve Avatar & Public Web Photos
             status.write("🖼️ Discovering candidate profile photos & face from public web...")
             known_links = [l.get("url_or_handle", "") for l in p.get("links_and_handles", [])]
-            avatar_info = avatar_fetcher.resolve_candidate_avatar(
-                name=c_name,
-                email=c_email,
-                social_links=known_links,
-                location=c_location,
-                employer=clean_employers[0] if clean_employers else None
-            )
+            try:
+                avatar_info = avatar_fetcher.resolve_candidate_avatar(
+                    name=c_name,
+                    email=c_email,
+                    social_links=known_links,
+                    location=c_location,
+                    employer=clean_employers[0] if clean_employers else None
+                )
+            except Exception as e:
+                avatar_info = {
+                    "url": avatar_fetcher.get_initials_avatar(c_name),
+                    "source": "Generated Name Badge",
+                    "confidence": "Fallback",
+                    "gallery": []
+                }
             st.session_state["candidate_avatar"] = avatar_info
 
             # 3. OSINT Search
             status.write("🌐 Executing multi-track OSINT search (LinkedIn, Instagram, X/Twitter, FB, Reddit, Employer check)...")
-            search_findings = osint_search.run_candidate_osint(
-                candidate_name=c_name,
-                location=c_location,
-                past_employers=clean_employers,
-                references=p.get("references", []),
-                email=c_email,
-                serper_api_key=serper_api_key
-            )
+            try:
+                search_findings = osint_search.run_candidate_osint(
+                    candidate_name=c_name,
+                    location=c_location,
+                    past_employers=clean_employers,
+                    references=p.get("references", []),
+                    email=c_email,
+                    serper_api_key=serper_api_key
+                )
+            except Exception as e:
+                search_findings = {
+                    "professional": [],
+                    "social": [],
+                    "employer_validation": {},
+                    "reference_verification": {},
+                    "web_mentions": [],
+                    "raw_findings": []
+                }
 
             # 4. AI Verification & EEOC Firewall
             status.write("🛡️ Analyzing timeline consistency and applying EEOC conduct firewall...")
-            verif = verifier.verify_candidate_profile(
-                candidate_data=updated_candidate,
-                search_results=search_findings,
-                api_key=api_key
-            )
+            try:
+                verif = verifier.verify_candidate_profile(
+                    candidate_data=updated_candidate,
+                    search_results=search_findings,
+                    api_key=api_key
+                )
+            except Exception as e:
+                verif = verifier.run_rule_based_verification(
+                    candidate_data=updated_candidate,
+                    search_results=search_findings
+                )
             
             verif["search_findings"] = search_findings
             st.session_state["verification_result"] = verif
