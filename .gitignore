@@ -1,0 +1,23 @@
+# Virtual environment
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Environment secrets
+.env
+.streamlit/secrets.toml
+
+# Uploaded candidate files (local privacy)
+uploads/
+temp/
+*.pdf
+*.docx
+*.png
+*.jpg
+*.jpeg
+
+# OS files
+.DS_Store
+Thumbs.db
