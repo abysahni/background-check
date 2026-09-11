@@ -2,17 +2,29 @@
 Multi-Track OSINT & Public Search Engine
 Performs concurrent targeted searches across professional networks, social media,
 past employer validation, and reference cross-checks.
-Uses DuckDuckGo search (free, no API key required) with robust fallback mechanisms.
+Uses DuckDuckGo search (free, no API key required) with SSL compatibility patch,
+intelligent URL classification, and optional Serper.dev Google API integration.
 """
 
 import concurrent.futures
+import os
 import re
+import ssl
 import urllib.parse
 import warnings
 from typing import Dict, List, Any, Optional
 import httpx
 
-warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*duckduckgo_search.*")
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+# SSL compatibility patch for LibreSSL / macOS Python 3.9
+try:
+    import ddgs.http_client2
+    def _safe_ssl_context(verify=True):
+        return ssl.create_default_context()
+    ddgs.http_client2._get_random_ssl_context = _safe_ssl_context
+except Exception:
+    pass
 
 
 def derive_handles_from_email(email: Optional[str]) -> List[str]:
@@ -21,93 +33,102 @@ def derive_handles_from_email(email: Optional[str]) -> List[str]:
         return []
     prefix = email.split("@")[0].lower()
     handles = [prefix]
-    # Remove dots or underscores
     clean = re.sub(r"[._-]", "", prefix)
     if clean != prefix and len(clean) >= 3:
         handles.append(clean)
     return handles
 
 
-def search_ddg(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    """Execute a single DuckDuckGo search query reliably using lite endpoint and fallback."""
+def search_serper(query: str, api_key: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """Execute Google search via Serper.dev API if key is provided."""
     results = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    
-    # 1. Primary: lite.duckduckgo.com (Fastest, zero captcha / bot challenges)
     try:
-        from bs4 import BeautifulSoup
-        with httpx.Client(timeout=8.0, headers=headers, follow_redirects=True) as client:
-            resp = client.post("https://lite.duckduckgo.com/lite/", data={"q": query})
+        url = "https://google.serper.dev/search"
+        headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+        payload = {"q": query, "num": max_results}
+        with httpx.Client(timeout=6.0) as client:
+            resp = client.post(url, headers=headers, json=payload)
             if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                links = soup.find_all("a", class_="result-link")
-                snippets = soup.find_all("td", class_="result-snippet")
-                
-                count = min(len(links), max_results)
-                for i in range(count):
-                    title = links[i].text.strip()
-                    href = links[i].get("href", "").strip()
-                    
-                    # Decode target URL if wrapped in DuckDuckGo redirect
-                    if "uddg=" in href:
-                        parsed_url = urllib.parse.urlparse(href)
-                        qs = urllib.parse.parse_qs(parsed_url.query)
-                        if "uddg" in qs:
-                            href = qs["uddg"][0]
-                    
-                    snippet = snippets[i].text.strip() if i < len(snippets) else ""
-                    if href and title:
-                        results.append({
-                            "title": title,
-                            "href": href,
-                            "body": snippet
-                        })
-        if resp.status_code == 200:
-            return results
+                data = resp.json()
+                for item in data.get("organic", []):
+                    results.append({
+                        "title": item.get("title", ""),
+                        "href": item.get("link", ""),
+                        "body": item.get("snippet", "")
+                    })
     except Exception:
         pass
+    return results
 
-    # 2. Secondary fallback: ddgs / duckduckgo-search package
+
+def search_ddg(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """Execute a single DuckDuckGo search query safely with browser TLS fingerprinting."""
+    results = []
     try:
         try:
             from ddgs import DDGS
         except ImportError:
             from duckduckgo_search import DDGS
+
         with DDGS() as ddgs:
-            raw_results = list(ddgs.text(query, max_results=max_results))
-            for item in raw_results:
-                results.append({
-                    "title": item.get("title", ""),
-                    "href": item.get("href", ""),
-                    "body": item.get("body", "")
-                })
+            raw = list(ddgs.text(query, max_results=max_results))
+            for item in raw:
+                href = item.get("href", "").strip()
+                title = item.get("title", "").strip()
+                if href and title and not any(bad in href for bad in ["duckduckgo.com", "bing.com/aclick", "r.search.yahoo"]):
+                    results.append({
+                        "title": title,
+                        "href": href,
+                        "body": item.get("body", "")
+                    })
     except Exception:
-        pass
+        # Fallback to direct HTTP request
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+            with httpx.Client(timeout=6.0, headers=headers, follow_redirects=True) as client:
+                resp = client.post("https://lite.duckduckgo.com/lite/", data={"q": query})
+                if resp.status_code == 200:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    links = soup.find_all("a", class_="result-link")
+                    snippets = soup.find_all("td", class_="result-snippet")
+                    for i in range(min(len(links), max_results)):
+                        href = links[i].get("href", "").strip()
+                        if "uddg=" in href:
+                            qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                            if "uddg" in qs:
+                                href = qs["uddg"][0]
+                        title = links[i].text.strip()
+                        snippet = snippets[i].text.strip() if i < len(snippets) else ""
+                        if href and title:
+                            results.append({"title": title, "href": href, "body": snippet})
+        except Exception:
+            pass
 
     return results
 
 
-
-def check_direct_profile(platform_name: str, url: str) -> Optional[Dict[str, Any]]:
-    """Quickly check if a direct platform profile exists (e.g. GitHub or Reddit)."""
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-    try:
-        with httpx.Client(timeout=4.0, headers=headers, follow_redirects=True) as client:
-            resp = client.head(url)
-            if resp.status_code == 200:
-                return {
-                    "platform": platform_name,
-                    "url": url,
-                    "title": f"{platform_name} Profile Found",
-                    "snippet": f"Active public profile verified at {url}",
-                    "confidence": "High (Direct Match)"
-                }
-    except Exception:
-        pass
+def classify_url_platform(url: str, title: str) -> Optional[Dict[str, str]]:
+    """Determine the social or professional platform from the URL structure."""
+    u = url.lower()
+    if "linkedin.com" in u:
+        return {"platform": "LinkedIn", "category": "Professional", "badge": "💼 LinkedIn"}
+    elif "github.com" in u and not any(x in u for x in ["github.com/topics", "github.com/features"]):
+        return {"platform": "GitHub", "category": "Professional", "badge": "💻 GitHub"}
+    elif "instagram.com" in u and not any(x in u for x in ["instagram.com/p/", "instagram.com/reel/"]):
+        return {"platform": "Instagram", "category": "Social", "badge": "📸 Instagram"}
+    elif "facebook.com" in u and not any(x in u for x in ["facebook.com/sharer", "facebook.com/login"]):
+        return {"platform": "Facebook", "category": "Social", "badge": "👥 Facebook"}
+    elif "twitter.com" in u or "x.com" in u:
+        return {"platform": "Twitter / X", "category": "Social", "badge": "🐦 X / Twitter"}
+    elif "reddit.com" in u:
+        return {"platform": "Reddit", "category": "Social", "badge": "💬 Reddit"}
+    elif "tiktok.com" in u:
+        return {"platform": "TikTok", "category": "Social", "badge": "🎵 TikTok"}
+    elif "threads.net" in u:
+        return {"platform": "Threads", "category": "Social", "badge": "🧵 Threads"}
+    elif any(d in u for d in ["medium.com", "substack.com", "wordpress.com", "blogspot.com", "dev.to"]):
+        return {"platform": "Articles & Blogs", "category": "Publications", "badge": "📝 Article/Blog"}
     return None
 
 
@@ -118,164 +139,132 @@ def run_candidate_osint(
     references: Optional[List[Dict[str, Any]]] = None,
     email: Optional[str] = None,
     additional_handles: Optional[List[str]] = None,
+    serper_api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run multi-track concurrent OSINT investigation:
+    Run high-yield multi-track concurrent OSINT investigation:
     1. Professional Profiles (LinkedIn, GitHub, Portfolio)
-    2. Social Networks (X/Twitter, Instagram, Facebook, Reddit)
+    2. Social Networks (X/Twitter, Instagram, Facebook, Reddit, TikTok)
     3. Employer Validation (Check if previous stores/companies exist)
     4. Reference Cross-Check (Confirm reference actually worked at employer)
-    5. Direct Handle Discovery
     """
-    loc_clause = f'"{location.strip()}"' if location and location.strip() else ""
-    first_employer = past_employers[0] if past_employers and len(past_employers) > 0 else ""
-    first_emp_clause = f'"{first_employer.strip()}"' if first_employer else ""
+    c_name = candidate_name.strip()
+    loc = location.strip() if location else ""
+    first_emp = past_employers[0].strip() if past_employers and len(past_employers) > 0 else ""
 
-    # Define Query Tracks
     queries = {}
 
-    # Track 1: LinkedIn Professional
-    queries["linkedin"] = {
-        "category": "Professional",
-        "platform": "LinkedIn",
-        "query": f'site:linkedin.com/in/ "{candidate_name}" {loc_clause} {first_emp_clause}'.strip(),
-    }
+    # 1. LinkedIn Targets
+    queries["linkedin_1"] = {"target": "LinkedIn", "query": f"{c_name} {loc} {first_emp} LinkedIn".strip()}
+    queries["linkedin_2"] = {"target": "LinkedIn", "query": f"site:linkedin.com {c_name} {loc}".strip()}
 
-    # Track 2: GitHub / Portfolio
-    queries["github"] = {
-        "category": "Professional",
-        "platform": "GitHub",
-        "query": f'site:github.com "{candidate_name}"'.strip(),
-    }
+    # 2. Instagram
+    queries["instagram"] = {"target": "Instagram", "query": f"{c_name} {loc} Instagram".strip()}
 
-    # Track 3: Twitter / X
-    queries["twitter"] = {
-        "category": "Social",
-        "platform": "Twitter / X",
-        "query": f'(site:twitter.com OR site:x.com) "{candidate_name}" {loc_clause}'.strip(),
-    }
+    # 3. Facebook
+    queries["facebook"] = {"target": "Facebook", "query": f"{c_name} {loc} Facebook".strip()}
 
-    # Track 4: Instagram
-    queries["instagram"] = {
-        "category": "Social",
-        "platform": "Instagram",
-        "query": f'site:instagram.com "{candidate_name}" {loc_clause}'.strip(),
-    }
+    # 4. Twitter / X
+    queries["twitter"] = {"target": "Twitter / X", "query": f"{c_name} {loc} Twitter OR X".strip()}
 
-    # Track 5: Facebook
-    queries["facebook"] = {
-        "category": "Social",
-        "platform": "Facebook",
-        "query": f'site:facebook.com "{candidate_name}" {loc_clause}'.strip(),
-    }
+    # 5. Reddit
+    queries["reddit"] = {"target": "Reddit", "query": f"{c_name} {loc} Reddit".strip()}
 
-    # Track 6: Blogs / Publications / Medium
-    queries["blogs"] = {
-        "category": "Publications",
-        "platform": "Articles & Blogs",
-        "query": f'(site:medium.com OR site:substack.com OR site:wordpress.com) "{candidate_name}"'.strip(),
-    }
+    # 6. News & Public mentions
+    queries["news"] = {"target": "Public News", "query": f'"{c_name}" {loc} {first_emp}'.strip()}
 
-    # Track 7: Employer Legitimacy Checks (Up to 3 employers)
+    # 7. Employer Legitimacy
     if past_employers:
         for idx, emp in enumerate(past_employers[:3]):
             if emp and len(emp.strip()) > 1:
                 queries[f"employer_{idx}"] = {
-                    "category": "Employer Validation",
-                    "platform": emp.strip(),
-                    "query": f'"{emp.strip()}" {loc_clause} (store OR company OR retail OR business OR location)'.strip(),
+                    "target": f"Employer: {emp.strip()}",
+                    "query": f'"{emp.strip()}" {loc} store OR company OR retail OR business'.strip(),
                 }
 
-    # Track 8: Reference Verification Checks
+    # 8. Reference Cross-Verification
     if references:
         for idx, ref in enumerate(references[:3]):
             ref_name = ref.get("name", "").strip()
-            ref_comp = ref.get("company", "").strip() or first_employer
+            ref_comp = ref.get("company", "").strip() or first_emp
             if ref_name:
                 queries[f"reference_{idx}"] = {
-                    "category": "Reference Verification",
-                    "platform": ref_name,
+                    "target": f"Reference: {ref_name}",
                     "query": f'"{ref_name}" "{ref_comp}"'.strip(),
                 }
 
-    # Direct Handle checks (Reddit, GitHub, Twitter)
-    derived_handles = derive_handles_from_email(email)
-    if additional_handles:
-        for h in additional_handles:
-            clean_h = h.strip().lstrip("@")
-            if clean_h and clean_h not in derived_handles:
-                derived_handles.append(clean_h)
-
-    # Execute all searches concurrently with ThreadPoolExecutor
     search_results: Dict[str, Any] = {
         "professional": [],
         "social": [],
         "employer_validation": {},
         "reference_verification": {},
-        "direct_handles": [],
+        "web_mentions": [],
         "raw_findings": []
     }
 
+    seen_urls = set()
+
     def execute_query(key: str, info: Dict[str, str]):
-        raw = search_ddg(info["query"], max_results=4)
+        q = info["query"]
+        if serper_api_key and serper_api_key.strip():
+            raw = search_serper(q, serper_api_key.strip(), max_results=4)
+        else:
+            raw = search_ddg(q, max_results=4)
         return key, info, raw
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(execute_query, k, v) for k, v in queries.items()]
-        
-        # Check direct handles in parallel
-        handle_futures = []
-        for handle in derived_handles[:2]:
-            handle_futures.append(executor.submit(check_direct_profile, "GitHub", f"https://github.com/{handle}"))
-            handle_futures.append(executor.submit(check_direct_profile, "Reddit", f"https://www.reddit.com/user/{handle}"))
 
         for f in concurrent.futures.as_completed(futures):
             try:
                 key, info, items = f.result()
-                category = info["category"]
-                platform = info["platform"]
+                target = info["target"]
 
-                if category == "Professional":
-                    for item in items:
-                        search_results["professional"].append({
-                            "platform": platform,
-                            "title": item["title"],
-                            "url": item["href"],
-                            "snippet": item["body"]
-                        })
-                elif category == "Social":
-                    for item in items:
-                        search_results["social"].append({
-                            "platform": platform,
-                            "title": item["title"],
-                            "url": item["href"],
-                            "snippet": item["body"]
-                        })
-                elif category == "Employer Validation":
-                    search_results["employer_validation"][platform] = items
-                elif category == "Reference Verification":
-                    search_results["reference_verification"][platform] = items
-                
                 for item in items:
-                    search_results["raw_findings"].append({
-                        "category": category,
-                        "platform": platform,
+                    url = item["href"]
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+
+                    entry = {
+                        "platform": target,
                         "title": item["title"],
-                        "url": item["href"],
+                        "url": url,
+                        "snippet": item["body"]
+                    }
+
+                    # Classify URL
+                    classified = classify_url_platform(url, item["title"])
+                    if classified:
+                        entry["platform"] = classified["platform"]
+                        entry["badge"] = classified["badge"]
+                        if classified["category"] == "Professional":
+                            search_results["professional"].append(entry)
+                        elif classified["category"] == "Social":
+                            search_results["social"].append(entry)
+                        elif classified["category"] == "Publications":
+                            search_results["web_mentions"].append(entry)
+                    else:
+                        if target.startswith("Employer:"):
+                            emp_name = target.replace("Employer:", "").strip()
+                            if emp_name not in search_results["employer_validation"]:
+                                search_results["employer_validation"][emp_name] = []
+                            search_results["employer_validation"][emp_name].append(item)
+                        elif target.startswith("Reference:"):
+                            ref_name = target.replace("Reference:", "").strip()
+                            if ref_name not in search_results["reference_verification"]:
+                                search_results["reference_verification"][ref_name] = []
+                            search_results["reference_verification"][ref_name].append(item)
+                        else:
+                            search_results["web_mentions"].append(entry)
+
+                    search_results["raw_findings"].append({
+                        "target": target,
+                        "platform": entry.get("platform", target),
+                        "title": item["title"],
+                        "url": url,
                         "snippet": item["body"]
                     })
-            except Exception:
-                pass
-
-        for hf in concurrent.futures.as_completed(handle_futures):
-            try:
-                h_res = hf.result()
-                if h_res:
-                    search_results["direct_handles"].append(h_res)
-                    if h_res["platform"] == "GitHub":
-                        search_results["professional"].append(h_res)
-                    else:
-                        search_results["social"].append(h_res)
             except Exception:
                 pass
 

@@ -1,13 +1,17 @@
 """
-Candidate Avatar & Display Photo Fetcher
-Fetches public profile photos to verify identity and match the candidate's face
-using Gravatar, GitHub, and Open Graph (og:image) metadata from public profiles.
+Candidate Avatar & Public Photo Discovery Engine
+Fetches public candidate photos using:
+1. Live Web Image Search (DuckDuckGo / Bing Image CDN)
+2. Gravatar (Email MD5 check)
+3. GitHub Public Avatar
+4. Open Graph (og:image) Scraper
+5. Fallback Initials Badge
 """
 
 import hashlib
 import re
 import urllib.parse
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 import httpx
 from bs4 import BeautifulSoup
 
@@ -49,7 +53,6 @@ def extract_github_username(text: str) -> Optional[str]:
     if not text:
         return None
     clean = text.strip()
-    # match github.com/username
     match = re.search(r"github\.com/([a-zA-Z0-9_-]+)", clean, re.IGNORECASE)
     if match:
         user = match.group(1)
@@ -57,11 +60,9 @@ def extract_github_username(text: str) -> Optional[str]:
             return user
     if clean.startswith("@"):
         return clean[1:]
-    # Check if plain valid GitHub handle
     if re.match(r"^[a-zA-Z0-9_-]{1,39}$", clean) and not clean.startswith("-"):
         return clean
     return None
-
 
 
 def check_github_avatar(username_or_url: str) -> Optional[str]:
@@ -80,36 +81,61 @@ def check_github_avatar(username_or_url: str) -> Optional[str]:
     return None
 
 
-def extract_og_image(url: str) -> Optional[str]:
-    """Extract Open Graph or Twitter image from public URL."""
-    if not url or not url.startswith("http"):
-        return None
-    # Skip domains that block unauthenticated head or return generic placeholder
-    skip_domains = ["facebook.com", "instagram.com"]
-    if any(domain in url.lower() for domain in skip_domains):
-        return None
+def search_candidate_web_photos(
+    name: str,
+    location: Optional[str] = None,
+    employer: Optional[str] = None,
+    max_results: int = 4
+) -> List[Dict[str, str]]:
+    """Search the public web for candidate face photos, portraits, and thumbnails."""
+    if not name or len(name.strip()) < 2:
+        return []
+    
+    clean_name = name.strip()
+    loc = location.strip() if location else ""
+    emp = employer.strip() if employer else ""
+
+    queries_to_try = [
+        f'"{clean_name}" {loc} {emp}'.strip(),
+        f'"{clean_name}" {loc}'.strip(),
+        f'"{clean_name}" {emp}'.strip(),
+        f'{clean_name} portrait OR photo OR profile'.strip(),
+    ]
+
+    discovered = []
+    seen_urls = set()
 
     try:
-        with httpx.Client(timeout=5.0, headers=HEADERS, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code != 200 or not resp.text:
-                return None
-            soup = BeautifulSoup(resp.text, "html.parser")
-            
-            # Check og:image or twitter:image
-            for meta_prop in ["og:image", "twitter:image", "og:image:url"]:
-                tag = soup.find("meta", attrs={"property": meta_prop}) or soup.find("meta", attrs={"name": meta_prop})
-                if tag and tag.get("content"):
-                    img_url = tag["content"].strip()
-                    # Resolve relative URLs
-                    img_url = urllib.parse.urljoin(url, img_url)
-                    # Filter out obvious non-avatars (standard platform logos / favicons)
-                    lower_img = img_url.lower()
-                    if not any(bad in lower_img for bad in ["logo-", "site-logo", "favicon", "default_avatar", "badge"]):
-                        return img_url
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+
+        with DDGS() as ddgs:
+            for q in queries_to_try:
+                if not q or q == f'"{clean_name}"':
+                    continue
+                try:
+                    raw_imgs = list(ddgs.images(q, max_results=max_results))
+                    for item in raw_imgs:
+                        thumb = item.get("thumbnail") or item.get("image")
+                        high_res = item.get("image") or thumb
+                        if thumb and thumb not in seen_urls:
+                            seen_urls.add(thumb)
+                            discovered.append({
+                                "url": thumb,
+                                "high_res": high_res,
+                                "title": item.get("title", f"Photo for {clean_name}"),
+                                "source": item.get("url", ""),
+                            })
+                    if len(discovered) >= max_results:
+                        break
+                except Exception:
+                    continue
     except Exception:
         pass
-    return None
+
+    return discovered[:max_results]
 
 
 def resolve_candidate_avatar(
@@ -117,45 +143,68 @@ def resolve_candidate_avatar(
     email: Optional[str] = None,
     social_links: Optional[List[str]] = None,
     github_handle: Optional[str] = None,
-) -> Dict[str, str]:
+    location: Optional[str] = None,
+    employer: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Resolve best candidate avatar using cascading sources:
+    Resolve best candidate avatar and photo gallery using multi-source discovery:
     1. Gravatar (email-based, high accuracy)
     2. GitHub profile
-    3. Open Graph image from personal site / public profiles
-    4. Clean modern initials avatar fallback
+    3. Public Web Photo Discovery (searches DDG / Bing Image CDN)
+    4. Fallback Initials Badge
     """
+    gallery: List[Dict[str, str]] = []
+
     # 1. Gravatar
     if email:
         gravatar = check_gravatar(email)
         if gravatar:
-            return {"url": gravatar, "source": "Gravatar (Email Match)", "confidence": "High"}
+            return {
+                "url": gravatar,
+                "source": "Gravatar (Email Match)",
+                "confidence": "High",
+                "gallery": [{"url": gravatar, "title": "Gravatar Profile Photo", "source": email}]
+            }
 
     # 2. GitHub
     if github_handle:
         gh_avatar = check_github_avatar(github_handle)
         if gh_avatar:
-            return {"url": gh_avatar, "source": f"GitHub (@{github_handle})", "confidence": "High"}
+            return {
+                "url": gh_avatar,
+                "source": f"GitHub (@{github_handle})",
+                "confidence": "High",
+                "gallery": [{"url": gh_avatar, "title": "GitHub Profile Photo", "source": f"https://github.com/{github_handle}"}]
+            }
 
     if social_links:
         for link in social_links:
             if "github.com" in link.lower():
                 gh_avatar = check_github_avatar(link)
                 if gh_avatar:
-                    return {"url": gh_avatar, "source": "GitHub Profile", "confidence": "High"}
+                    return {
+                        "url": gh_avatar,
+                        "source": "GitHub Profile",
+                        "confidence": "High",
+                        "gallery": [{"url": gh_avatar, "title": "GitHub Profile Photo", "source": link}]
+                    }
 
-        # 3. Open Graph image from personal portfolio or blogs
-        for link in social_links:
-            if any(dom in link.lower() for dom in ["medium.com", "substack.com", "dev.to", "about.me"]) or (
-                not any(big in link.lower() for big in ["linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com"])
-            ):
-                og_img = extract_og_image(link)
-                if og_img:
-                    return {"url": og_img, "source": f"Public Profile ({urllib.parse.urlparse(link).netloc})", "confidence": "Medium"}
+    # 3. Live Public Web Image Search
+    web_photos = search_candidate_web_photos(name=name, location=location, employer=employer, max_results=4)
+    if web_photos:
+        primary_photo = web_photos[0]
+        return {
+            "url": primary_photo["url"],
+            "source": f"Web Photo ({primary_photo.get('title', 'Public Profile')[:35]}...)",
+            "confidence": "Medium (Web Discovery)",
+            "gallery": web_photos
+        }
 
-    # 4. Fallback Initials
+    # 4. Fallback Initials Badge
+    fallback_url = get_initials_avatar(name)
     return {
-        "url": get_initials_avatar(name),
+        "url": fallback_url,
         "source": "Generated Name Badge",
         "confidence": "Fallback",
+        "gallery": []
     }

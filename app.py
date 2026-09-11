@@ -137,6 +137,15 @@ with st.sidebar:
         if not api_key:
             st.info("💡 [Get a free Gemini API Key](https://aistudio.google.com/)")
 
+    # Optional Serper.dev Key for Google Search
+    serper_api_key = get_secret("SERPER_API_KEY", "")
+    if not serper_api_key:
+        serper_api_key = st.text_input(
+            "Serper Key (Optional Google Search)",
+            type="password",
+            help="Free 2,500 Google searches at serper.dev. Leave empty to use free DuckDuckGo."
+        )
+
     st.divider()
     
     # Store Role Selection
@@ -273,24 +282,27 @@ if st.session_state["parsed_data"]:
             # Rebuild clean employers list
             clean_employers = [e.strip() for e in emp_text.split(",") if e.strip()]
             
-            # 2. Resolve Avatar
-            status.write("🖼️ Discovering candidate profile photo & avatar...")
+            # 2. Resolve Avatar & Public Web Photos
+            status.write("🖼️ Discovering candidate profile photos & face from public web...")
             known_links = [l.get("url_or_handle", "") for l in p.get("links_and_handles", [])]
             avatar_info = avatar_fetcher.resolve_candidate_avatar(
                 name=c_name,
                 email=c_email,
-                social_links=known_links
+                social_links=known_links,
+                location=c_location,
+                employer=clean_employers[0] if clean_employers else None
             )
             st.session_state["candidate_avatar"] = avatar_info
 
             # 3. OSINT Search
-            status.write("🌐 Executing multi-track OSINT search (LinkedIn, X/Twitter, IG, FB, Reddit, Employer check)...")
+            status.write("🌐 Executing multi-track OSINT search (LinkedIn, Instagram, X/Twitter, FB, Reddit, Employer check)...")
             search_findings = osint_search.run_candidate_osint(
                 candidate_name=c_name,
                 location=c_location,
                 past_employers=clean_employers,
                 references=p.get("references", []),
-                email=c_email
+                email=c_email,
+                serper_api_key=serper_api_key
             )
 
             # 4. AI Verification & EEOC Firewall
@@ -324,7 +336,7 @@ if st.session_state.get("verification_result") and st.session_state.get("candida
         
         with col_img:
             st.image(avatar["url"], width=130)
-            st.caption(f"Photo source: **{avatar['source']}**")
+            st.caption(f"Photo: **{avatar['source']}**")
         
         with col_info:
             st.markdown(f"### {cand.get('candidate_name', 'Applicant')}")
@@ -343,6 +355,16 @@ if st.session_state.get("verification_result") and st.session_state.get("candida
             st.markdown(f"<br>**Conduct Risk:** <span class='{risk_class}'>{risk}</span>", unsafe_allow_html=True)
             
             st.markdown(f"<br><small>Store: {store_name}</small>", unsafe_allow_html=True)
+
+        # Discovered Web Photo Gallery
+        if avatar.get("gallery") and len(avatar["gallery"]) > 1:
+            st.markdown("---")
+            st.markdown(f"**📸 Discovered Public Web Photos ({len(avatar['gallery'])} found):**")
+            p_cols = st.columns(min(4, len(avatar["gallery"])))
+            for idx, p_item in enumerate(avatar["gallery"][:4]):
+                with p_cols[idx]:
+                    st.image(p_item["url"], use_container_width=True)
+                    st.caption(f"[{p_item.get('title', 'Photo')[:28]}...]({p_item.get('source', p_item['url'])})")
         
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -384,10 +406,11 @@ if st.session_state.get("verification_result") and st.session_state.get("candida
     # --- TAB 2: DIGITAL & SOCIAL FOOTPRINT ---
     with tab2:
         st.subheader("Public Social & Web Presence")
-        st.markdown("Public records and profiles discovered via targeted OSINT dorking:")
+        st.markdown("Public records and profiles discovered via targeted OSINT search:")
         
         prof_links = findings.get("professional", [])
         soc_links = findings.get("social", [])
+        mentions = findings.get("web_mentions", [])
         
         col_prof, col_soc = st.columns(2)
         
@@ -395,7 +418,8 @@ if st.session_state.get("verification_result") and st.session_state.get("candida
             st.markdown("#### 💼 Professional Footprint")
             if prof_links:
                 for item in prof_links:
-                    st.markdown(f"- **[{item['platform']}] [{item['title']}]({item['url']})**")
+                    badge = item.get("badge", "💼 Professional")
+                    st.markdown(f"- **{badge}** : [{item['title']}]({item['url']})")
                     if item.get("snippet"):
                         st.caption(f"_{item['snippet'][:180]}..._")
             else:
@@ -405,11 +429,19 @@ if st.session_state.get("verification_result") and st.session_state.get("candida
             st.markdown("#### 🌐 Social Networks & Forums")
             if soc_links:
                 for item in soc_links:
-                    st.markdown(f"- **[{item['platform']}] [{item['title']}]({item['url']})**")
+                    badge = item.get("badge", "🌐 Social")
+                    st.markdown(f"- **{badge}** : [{item['title']}]({item['url']})")
                     if item.get("snippet"):
                         st.caption(f"_{item['snippet'][:180]}..._")
             else:
                 st.caption("No public social accounts indexed under this name and location.")
+
+        if mentions:
+            st.markdown("#### 📰 Web Mentions & Articles")
+            for m in mentions[:6]:
+                st.markdown(f"- **[{m['title']}]({m['url']})**")
+                if m.get("snippet"):
+                    st.caption(f"_{m['snippet'][:180]}..._")
 
         # Raw Search Evidence
         with st.expander("🔎 View All Raw Search Findings & Citations"):
